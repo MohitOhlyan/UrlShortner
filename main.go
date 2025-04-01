@@ -1,58 +1,71 @@
 package main
 
 import (
-	"fmt"
+	"context"
+	"log"
 	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/gorilla/mux"
+	"urlShortner/api"
+	"urlShortner/config"
+	"urlShortner/db"
 )
 
-type api struct {
-	addr string
-}
-
-func (s *api) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	w.Write([]byte("Hello, World!"))
-	fmt.Println("Request recieved", r.URL.Path)
-	switch r.Method {
-	case
-		http.MethodGet:
-		switch r.URL.Path {
-		case "/":
-			w.Write([]byte("Index Page"))
-			return
-		case "/about":
-			w.Write([]byte("About Page"))
-			return
-		}
-	default:
-		w.Write([]byte("404"))
-	}
-}
-
-func (a *api) getUsersHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Request recieved", r.URL.Path)
-	w.Write([]byte("Users List..."))
-}
-
-func (a *api) createUserHandler(w http.ResponseWriter, r *http.Request) {
-	fmt.Println("Request recieved", r.URL.Path)
-	w.Write([]byte("Users List..."))
-}
-
 func main() {
-	api := &api{addr: ":8080"}
+	// Loding configuration from Config/config.go
+	cfg := config.Load()
 
-	mux := http.NewServeMux()
+	// Connect to MongoDB
+	db.Connect(cfg)
 
-	srv := &http.Server{
-		Addr:    api.addr,
-		Handler: mux,
+	// Create a new router
+	router := mux.NewRouter()
+
+	// Register routes
+	router.HandleFunc("/api/shorten", api.CreateShortURLHandler(cfg)).Methods("POST")
+	router.HandleFunc("/api/stats/{shortCode}", api.URLStatsHandler()).Methods("GET")
+	router.HandleFunc("/health", api.HealthCheckHandler()).Methods("GET")
+	router.HandleFunc("/{shortCode}", api.RedirectHandler()).Methods("GET")
+	// Set up the server
+	server := &http.Server{
+		Addr:         ":" + cfg.ServerPort,
+		Handler:      router,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
 	}
 
-	mux.HandleFunc("GET /users", api.getUsersHandler)
-	mux.HandleFunc("POST /users", api.createUserHandler)
-	err := srv.ListenAndServe()
-	if err != nil {
-		fmt.Println("Request recieveda")
-		panic(err)
+	// Start the server in a goroutine
+	go func() {
+		log.Printf("Starting server on port %s\n", cfg.ServerPort)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	// Set up graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+	<-quit
+	log.Println("Shutting down server...")
+
+	// Create a deadline for server shutdown
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Shutdown the server
+	if err := server.Shutdown(ctx); err != nil {
+		log.Fatalf("Server forced to shutdown: %v", err)
 	}
+
+	// Disconnect from MongoDB
+	if err := db.Disconnect(ctx); err != nil {
+		log.Fatalf("Error disconnecting from MongoDB: %v", err)
+	}
+
+	log.Println("Server exiting")
 }
